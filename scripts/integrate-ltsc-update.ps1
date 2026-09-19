@@ -70,6 +70,37 @@ function Search-UpdateCatalog {
     return @()
 }
 
+# --- Helper: Pick the newest matching catalog entry ---
+# Catalog result order is not guaranteed, so rank by the "YYYY-MM" title prefix, then by
+# the OS build in the title, then by KB number, instead of trusting the first row.
+
+function Select-LatestCatalogUpdate {
+    param(
+        [array]$Entries,
+        [string]$MustMatch,
+        [string[]]$Exclude = @()
+    )
+
+    $candidates = @($Entries | Where-Object { $_.Title -match $MustMatch })
+    foreach ($pattern in $Exclude) {
+        $candidates = @($candidates | Where-Object { $_.Title -notmatch $pattern })
+    }
+    if ($candidates.Count -eq 0) { return $null }
+
+    $ranked = $candidates | ForEach-Object {
+        $yearMonth = 0
+        if ($_.Title -match '^\s*(\d{4})-(\d{2})') { $yearMonth = [int]$Matches[1] * 100 + [int]$Matches[2] }
+        # Newer catalog titles also carry the resulting OS build, e.g. "(KB5129235) (26100.33451)"
+        $build = 0
+        if ($_.Title -match '\((\d{5})\.(\d+)\)') { $build = [long]$Matches[1] * 1000000 + [long]$Matches[2] }
+        $kb = 0
+        if ($_.Title -match 'KB(\d+)') { $kb = [long]$Matches[1] }
+        [PSCustomObject]@{ Entry = $_; YearMonth = $yearMonth; Build = $build; KB = $kb }
+    } | Sort-Object -Property @{ Expression = 'YearMonth'; Descending = $true }, @{ Expression = 'Build'; Descending = $true }, @{ Expression = 'KB'; Descending = $true }
+
+    return ($ranked | Select-Object -First 1).Entry
+}
+
 # --- Helper: Get download URLs for a catalog entry ---
 
 function Get-CatalogDownloadUrls {
@@ -137,19 +168,20 @@ if ($updates.Count -eq 0) {
     exit 1
 }
 
-# Filter: non-Preview, non-Out-of-Band cumulative updates
-$filtered = $updates | Where-Object {
-    $_.Title -notmatch "Preview" -and
-    $_.Title -notmatch "Out-of-Band" -and
-    $_.Title -match "Cumulative Update"
+# Newest non-Preview, non-Out-of-Band OS cumulative update (exclude .NET and Dynamic Update rows)
+$selectedCU = Select-LatestCatalogUpdate -Entries $updates -MustMatch "Cumulative Update" `
+    -Exclude @("Preview", "Out-of-Band", "\.NET", "Dynamic")
+
+if (-not $selectedCU) {
+    Write-Warning "No non-Preview cumulative update found after filtering, relaxing filters"
+    $selectedCU = Select-LatestCatalogUpdate -Entries $updates -MustMatch "Cumulative Update" -Exclude @("\.NET", "Dynamic")
 }
 
-if (-not $filtered -or $filtered.Count -eq 0) {
-    Write-Warning "Filtering failed, using first catalog entry"
-    $filtered = $updates | Select-Object -First 1
+if (-not $selectedCU) {
+    Write-Error "Failed to select a cumulative update from catalog results"
+    exit 1
 }
 
-$selectedCU = $filtered | Select-Object -First 1
 Write-Host "Selected CU: $($selectedCU.Title)"
 Write-Host "  GUID: $($selectedCU.GUID)"
 
@@ -195,19 +227,13 @@ if ($netUpdates.Count -gt 0) {
     Write-Host "First 3 entries:"
     $netUpdates | Select-Object -First 3 | ForEach-Object { Write-Host "  [$($_.GUID)] $($_.Title)" }
 
-    # Filter for non-Preview .NET updates
-    $netFiltered = $netUpdates | Where-Object {
-        $_.Title -notmatch "Preview" -and
-        $_.Title -match "\.NET Framework" -and
-        $_.Title -match "x64"
+    # Newest non-Preview .NET Framework cumulative update for x64
+    $selectedNet = Select-LatestCatalogUpdate -Entries $netUpdates -MustMatch "\.NET Framework.*x64" -Exclude @("Preview")
+    if (-not $selectedNet) {
+        $selectedNet = Select-LatestCatalogUpdate -Entries $netUpdates -MustMatch "\.NET" -Exclude @("Preview")
     }
 
-    if (-not $netFiltered -or $netFiltered.Count -eq 0) {
-        $netFiltered = $netUpdates | Where-Object { $_.Title -match "\.NET" } | Select-Object -First 1
-    }
-
-    if ($netFiltered -and $netFiltered.Count -gt 0) {
-        $selectedNet = $netFiltered | Select-Object -First 1
+    if ($selectedNet) {
         Write-Host "Selected .NET update: $($selectedNet.Title)"
 
         $netUrls = Get-CatalogDownloadUrls -GUID $selectedNet.GUID

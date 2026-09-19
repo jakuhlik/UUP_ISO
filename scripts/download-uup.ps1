@@ -1,13 +1,12 @@
 param(
-    [Parameter(Mandatory)][string]$DownloadDir
+    [Parameter(Mandatory)][string]$DownloadDir,
+    [string]$Aria2File = "D:\aria2_download_list.txt"
 )
 
 $ErrorActionPreference = "Stop"
 
-$aria2File = "D:\aria2_download_list.txt"
-
-if (-not (Test-Path $aria2File)) {
-    Write-Error "aria2 input file not found at $aria2File"
+if (-not (Test-Path $Aria2File)) {
+    Write-Error "aria2 input file not found at $Aria2File"
     exit 1
 }
 
@@ -27,7 +26,7 @@ if ($freeGB -lt 10) {
 # Run aria2c
 Write-Host "Starting download to $DownloadDir..."
 $aria2Args = @(
-    "--input-file=$aria2File"
+    "--input-file=$Aria2File"
     "--dir=$DownloadDir"
     "--max-connection-per-server=16"
     "--split=16"

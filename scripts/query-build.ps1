@@ -4,11 +4,24 @@ param(
     [Parameter(Mandatory)][string]$Milestone,
     [Parameter(Mandatory)][string]$Architecture,
     [Parameter(Mandatory)][string]$Language,
-    [Parameter(Mandatory)][string]$Edition
+    [Parameter(Mandatory)][string]$Edition,
+    [string]$Aria2File = "D:\aria2_download_list.txt",
+    [switch]$QueryOnly
 )
 
 $ErrorActionPreference = "Stop"
 
+$baseUrl = "https://api.uupdump.net"
+
+# Seconds to wait between consecutive UUP dump API calls (the API is rate limited per IP)
+$apiPauseSec = 10
+
+# --- Helpers -------------------------------------------------------------------
+
+# Calls the UUP dump JSON API. Known API errors (NO_UPDATE_FOUND, ...) come back as
+# HTTP 4xx/5xx with a JSON body; they are returned to the caller as a normal response
+# object with response.error set. Rate limits and upstream Windows Update failures are
+# retried with a growing delay. Only transport errors without a JSON body throw.
 function Invoke-ApiWithRetry {
     param(
         [string]$Uri,
@@ -16,29 +29,157 @@ function Invoke-ApiWithRetry {
         [int]$BaseDelaySec = 15
     )
     for ($attempt = 1; $attempt -le $MaxRetries; $attempt++) {
+        $resp = $null
         try {
             $resp = Invoke-RestMethod -Uri $Uri -Method Get
         } catch {
-            if ($_.ErrorDetails.Message -match "RATE_LIMITED") {
-                $delay = $BaseDelaySec * $attempt
-                Write-Warning "Rate limited (attempt $attempt/$MaxRetries), waiting ${delay}s..."
-                Start-Sleep -Seconds $delay
-                continue
+            $body = "$($_.ErrorDetails.Message)"
+            if ($body) {
+                try { $resp = $body | ConvertFrom-Json } catch { $resp = $null }
             }
-            throw
+            if (-not $resp) {
+                if ($attempt -lt $MaxRetries) {
+                    $delay = $BaseDelaySec * $attempt
+                    Write-Warning "Request failed ($($_.Exception.Message)), retrying in ${delay}s (attempt $attempt/$MaxRetries)..."
+                    Start-Sleep -Seconds $delay
+                    continue
+                }
+                throw
+            }
         }
-        if ($resp.response.error -eq "USER_RATE_LIMITED") {
+
+        $apiError = "$($resp.response.error)"
+        if ($apiError -match "RATE_LIMITED") {
             $delay = $BaseDelaySec * $attempt
             Write-Warning "Rate limited (attempt $attempt/$MaxRetries), waiting ${delay}s..."
             Start-Sleep -Seconds $delay
             continue
         }
+        if ($apiError -eq "WU_REQUEST_FAILED" -and $attempt -lt 3) {
+            # Upstream Windows Update hiccup: retry twice, then let the caller try its next candidate
+            $delay = $BaseDelaySec * $attempt
+            Write-Warning "Windows Update request failed upstream (attempt $attempt/3), waiting ${delay}s..."
+            Start-Sleep -Seconds $delay
+            continue
+        }
         return $resp
     }
-    throw "API still rate limited after $MaxRetries attempts on $Uri"
+    throw "API still failing after $MaxRetries attempts on $Uri"
 }
 
-# Validate product
+# listid.php returns "builds" either as a JSON array or as an object keyed by index
+# (PHP re-indexing after filtering). Normalize to a plain list.
+function ConvertTo-BuildList {
+    param($Builds)
+    if ($null -eq $Builds) { return @() }
+    if ($Builds -is [System.Array]) { return @($Builds) }
+    return @($Builds.PSObject.Properties | ForEach-Object { $_.Value })
+}
+
+# Searches the UUP dump database (builds already fetched by UUP dump itself).
+# Results are newest first. Returns the first entry matching arch/title/build.
+function Find-ListIdBuild {
+    param(
+        [string]$Search,
+        [string]$TitlePattern,
+        [string]$BuildPattern,
+        [string]$Arch
+    )
+    $url = "$baseUrl/listid.php?search=$([uri]::EscapeDataString($Search))&sortByDate=1"
+    Write-Host "Searching UUP dump database: $url"
+    $resp = Invoke-ApiWithRetry -Uri $url
+    if ($resp.response.error) {
+        Write-Warning "listid returned $($resp.response.error)"
+        return $null
+    }
+    foreach ($b in (ConvertTo-BuildList $resp.response.builds)) {
+        if ($b.arch -ne $Arch) { continue }
+        if ("$($b.title)" -notmatch $TitlePattern) { continue }
+        if ("$($b.build)" -notmatch $BuildPattern) { continue }
+        return $b
+    }
+    return $null
+}
+
+# Picks the OS build out of a fetchupd updateArray (skips .NET, OOBE, servicing stack, ...).
+# Titles starting with "Windows 11" (feature updates / Insider flights) are preferred over
+# other OS packages such as "Preview Update for Windows 11 (...)".
+function Select-OsUpdate {
+    param(
+        $Updates,
+        [string]$BuildPattern,
+        [string]$Arch
+    )
+    $skipTitles = 'Framework|Stack Package|Servicing Stack|OOBE|Feature Experience Pack|Autopilot|Microsoft Edge|Malicious Software|Hotpatch|Defender|Safe OS|Dynamic Update'
+    foreach ($preferFeatureUpdate in @($true, $false)) {
+        foreach ($u in $Updates) {
+            $title = "$($u.updateTitle)"
+            $foundBuild = "$($u.foundBuild)"
+            if ($Arch -and $u.arch -and $u.arch -ne $Arch) { continue }
+            if ($foundBuild -notmatch '^\d{5}\.\d+$') { continue }
+            if ($foundBuild -notmatch $BuildPattern) { continue }
+            if ($title -match $skipTitles) { continue }
+            if ($preferFeatureUpdate -and $title -notlike "Windows 11*") { continue }
+            return $u
+        }
+    }
+    return $null
+}
+
+# One fetchupd.php call. Returns the matching OS update or $null.
+function Invoke-FetchUpd {
+    param(
+        [string]$Arch,
+        [string]$Ring,
+        [string]$Build,
+        [string]$BuildPattern,
+        [string]$WantArch
+    )
+    $url = "$baseUrl/fetchupd.php?arch=$Arch&ring=$Ring"
+    if ($Build) { $url += "&build=$Build" }
+    Write-Host "Querying fetchupd API: $url"
+
+    $resp = Invoke-ApiWithRetry -Uri $url
+    if ($resp.response.error) {
+        Write-Host "  API returned: $($resp.response.error)"
+        return $null
+    }
+    $updates = @($resp.response.updateArray)
+    if ($updates.Count -eq 0) {
+        Write-Host "  No updateArray in response"
+        return $null
+    }
+    Write-Host "  $($updates.Count) update(s): $(($updates | ForEach-Object { "$($_.updateTitle) [$($_.arch)]" }) -join '; ')"
+    return Select-OsUpdate -Updates $updates -BuildPattern $BuildPattern -Arch $WantArch
+}
+
+# Tries each candidate base build for the requested architecture, then repeats the
+# candidates with arch=all (Windows Update refuses some arm64-only offers, e.g. 26H1 and
+# the Insider flights, unless the request is made for all architectures and filtered
+# afterwards).
+function Find-FetchUpdBuild {
+    param(
+        [string]$Ring,
+        [string[]]$BuildCandidates,
+        [string]$BuildPattern,
+        [string]$Arch
+    )
+    foreach ($archMode in @($Arch, "all")) {
+        foreach ($build in $BuildCandidates) {
+            $found = Invoke-FetchUpd -Arch $archMode -Ring $Ring -Build $build -BuildPattern $BuildPattern -WantArch $Arch
+            if ($found) {
+                Write-Host "Matched via ring=$Ring build=$build arch=$archMode"
+                return $found
+            }
+            Write-Host "  No matching build (pattern $BuildPattern), waiting ${apiPauseSec}s before next query..."
+            Start-Sleep -Seconds $apiPauseSec
+        }
+    }
+    return $null
+}
+
+# --- Input validation ---------------------------------------------------------
+
 if ($Product -notin @("Windows 11", "Windows 10", "Windows Server")) {
     Write-Error "Invalid product: '$Product'. Must be 'Windows 11', 'Windows 10', or 'Windows Server'"
     exit 1
@@ -57,19 +198,26 @@ if ($Product -in @("Windows 11", "Windows 10") -and $Edition -notin $clientEditi
     exit 1
 }
 
-# Validate architecture: arm64 not supported for Windows Server
-if ($Product -eq "Windows Server" -and $Architecture -eq "arm64") {
-    Write-Error "arm64 is not supported for Windows Server. Use amd64 instead."
+# Validate architecture
+if ($Architecture -notin @("amd64", "arm64", "x86")) {
+    Write-Error "Invalid architecture: '$Architecture'. Must be amd64, arm64 or x86"
+    exit 1
+}
+if ($Product -eq "Windows Server" -and $Architecture -ne "amd64") {
+    Write-Error "Windows Server 2025 is only available for amd64."
+    exit 1
+}
+if ($Product -eq "Windows 11" -and $Architecture -eq "x86") {
+    Write-Error "Windows 11 is not available for x86."
     exit 1
 }
 
-# Validate language code format
-if ($Language -notmatch '^[a-z]{2}-[a-z]{2}$') {
-    Write-Error "Invalid language code format: '$Language'. Expected format: xx-xx (e.g., en-us, zh-cn)"
+# Validate language code format (UUP dump uses lowercase xx-xx codes, plus sr-latn-rs)
+$Language = $Language.Trim().ToLowerInvariant()
+if ($Language -notmatch '^[a-z]{2,3}(-[a-z]{2,4}){1,2}$') {
+    Write-Error "Invalid language code format: '$Language'. Expected format: xx-xx (e.g., en-us, zh-cn, sr-latn-rs)"
     exit 1
 }
-
-$baseUrl = "https://api.uupdump.net"
 
 Write-Host "Product: $Product"
 Write-Host "Channel: $Channel"
@@ -79,204 +227,199 @@ Write-Host "Language: $Language"
 Write-Host "Edition: $Edition"
 Write-Host ""
 
-# Step 1: Get UUID based on product and channel
+# --- Step 1: Get UUID based on product and channel ------------------------------
+
 $uuid = $null
 $updateTitle = $null
+$channelLabel = $Channel
 
 if ($Product -eq "Windows 10") {
     # Windows 10: always use Feature Update for 22H2
     Write-Host "Querying listid API for Windows 10 22H2 Feature Update..."
-    $searchUrl = "$baseUrl/listid.php?search=Feature+update+to+Windows+10%2C+version+22H2&sortByDate=1"
-    $response = Invoke-ApiWithRetry -Uri $searchUrl
-
-    if ($response.response.error) {
-        Write-Error "API error: $($response.response.error)"
-        exit 1
-    }
-
-    $builds = $response.response.builds
-    if (-not $builds) {
-        Write-Error "No Feature Update builds found for Windows 10 22H2"
-        exit 1
-    }
-
-    $matched = $null
-    foreach ($prop in $builds.PSObject.Properties) {
-        $build = $prop.Value
-        $titleMatch = $build.title -like "*Feature update to Windows 10, version 22H2*"
-        $archMatch = $build.arch -eq $Architecture
-        if ($titleMatch -and $archMatch) {
-            $matched = $build
-            $uuid = $build.uuid
-            break
-        }
-    }
+    $matched = Find-ListIdBuild -Search "Feature update to Windows 10, version 22H2" `
+        -TitlePattern '^Feature update to Windows 10, version 22H2 \(' -BuildPattern '^19045\.' -Arch $Architecture
 
     if (-not $matched) {
         Write-Error "No matching Feature Update found for Windows 10 22H2 ($Architecture)"
         exit 1
     }
 
+    $uuid = $matched.uuid
     $updateTitle = $matched.title
     Write-Host "Found: $updateTitle (UUID: $uuid)"
 }
 elseif ($Product -eq "Windows Server") {
-    # Windows Server: always use Server 2025 (24H2)
+    # Windows Server: always use Server 2025 (24H2, build 26100)
     Write-Host "Querying listid API for Windows Server 2025..."
-    $searchUrl = "$baseUrl/listid.php?search=Windows+Server+2025&sortByDate=1"
-    $response = Invoke-ApiWithRetry -Uri $searchUrl
-
-    if ($response.response.error) {
-        Write-Error "API error: $($response.response.error)"
-        exit 1
-    }
-
-    $builds = $response.response.builds
-    if (-not $builds) {
-        Write-Error "No builds found for Windows Server 2025"
-        exit 1
-    }
-
-    $matched = $null
-    foreach ($prop in $builds.PSObject.Properties) {
-        $build = $prop.Value
-        $titleMatch = $build.title -like "*Windows Server 2025*"
-        $archMatch = $build.arch -eq $Architecture
-        if ($titleMatch -and $archMatch) {
-            $matched = $build
-            $uuid = $build.uuid
-            break
-        }
-    }
+    $matched = Find-ListIdBuild -Search "Windows Server 2025" `
+        -TitlePattern '^Windows Server 2025 \(' -BuildPattern '^26100\.' -Arch $Architecture
 
     if (-not $matched) {
         Write-Error "No matching build found for Windows Server 2025 ($Architecture)"
         exit 1
     }
 
+    $uuid = $matched.uuid
     $updateTitle = $matched.title
     Write-Host "Found: $updateTitle (UUID: $uuid)"
 }
 else {
-    # Windows 11: All channels use fetchupd API with correct ring parameter
-    $ringMap = @{
-        "Retail"         = "RETAIL"
-        "ReleasePreview" = "RP"
-        "Beta"           = "WIF"
-        "Dev"            = "WIS"
-        "Canary"         = "Canary"
+    # Windows 11 ------------------------------------------------------------------
+    #
+    # UUP dump fetchupd.php ring values (see git.uupdump.net/uup-dump/api):
+    #   RETAIL  - public release channel
+    #   RP      - Release Preview channel
+    #   BETA    - Beta channel (alias of the old WIS ring)
+    #   DEV     - Experimental channel (alias of the old WIF ring). Since April 2026 the
+    #             Dev and Canary channels are merged into "Experimental". The ring may carry
+    #             a target release suffix (FlightUpgradeTarget device attribute):
+    #               DEV:0  -> Experimental for the current Windows core (26H2 / 26H1 builds)
+    #               DEV:-1 -> Experimental (Future Platforms), the 29xxx series
+    #
+    # The "build" parameter is the OS version the fake client reports. Windows Update
+    # answers with what such a device would be offered, so:
+    #   - a build from the PREVIOUS platform triggers the cross-version upgrade path and
+    #     returns the official retail build of the requested version (once it is GA);
+    #   - a build from the SAME platform triggers the cumulative-update path and returns
+    #     the newest servicing build of that version (works before GA as well);
+    #   - "NNNNN.latest" lets UUP dump substitute the newest patch level it knows.
+    $milestoneConfig = @{
+        "27H2" = @{
+            # Windows 11 27H2 has no retail build yet; the 29xxx "Future Platforms" series is
+            # only flighted in the Experimental channel.
+            Label         = "Future Platforms"
+            RetailBuilds  = @()
+            RetailPattern = '^(29|3\d)\d{3}\.'
+            ExpRing       = "DEV:-1"
+            ExpBuilds     = @("26300.1", "latest")
+            ExpPattern    = '^(29|3\d)\d{3}\.'
+        }
+        "26H2" = @{
+            Label         = "26H2"
+            RetailBuilds  = @("26200.1", "26300.latest", "26300.1")
+            RetailPattern = '^26300\.'
+            ExpRing       = "DEV:0"
+            ExpBuilds     = @("26300.1", "26300.latest", "26200.1")
+            ExpPattern    = '^26[3-9]\d{2}\.'
+        }
+        "26H1" = @{
+            # 26H1 (build 28000, "Bromine") ships only pre-installed on new arm64 devices
+            # (Snapdragon X2 / NVIDIA N1X); it is not offered as an upgrade to any device.
+            Label         = "26H1"
+            RetailBuilds  = @("28000.1", "28000.latest")
+            RetailPattern = '^28000\.'
+            RetailArch    = "arm64"
+            ExpRing       = "DEV:0"
+            ExpBuilds     = @("28120.1", "28100.1", "28000.latest", "28000.1")
+            ExpPattern    = '^28\d{3}\.'
+        }
+        "25H2" = @{
+            Label         = "25H2"
+            RetailBuilds  = @("26100.1", "26200.latest", "26200.1")
+            RetailPattern = '^26200\.'
+            ExpRing       = "DEV:0"
+            ExpBuilds     = @("26300.1", "26300.latest", "26200.1")
+            ExpPattern    = '^26[3-9]\d{2}\.'
+        }
+        "24H2" = @{
+            Label         = "24H2"
+            RetailBuilds  = @("22631.1", "26100.latest", "26100.1")
+            RetailPattern = '^26100\.'
+            ExpRing       = "DEV:0"
+            ExpBuilds     = @("26300.1", "26300.latest", "26200.1")
+            ExpPattern    = '^26[3-9]\d{2}\.'
+        }
     }
-    $ring = $ringMap[$Channel]
-    if (-not $ring) {
-        Write-Error "Unknown channel: $Channel"
+
+    $config = $milestoneConfig[$Milestone]
+    if (-not $config) {
+        Write-Error "Unknown milestone: $Milestone. Supported: $($milestoneConfig.Keys -join ', ')"
         exit 1
     }
 
-    # Milestone config: each entry has a BuildPrefix for filtering results, and two possible
-    # BaseBuild values for Retail/RP queries:
-    #   - UpgradeBuild: a build from the PREVIOUS milestone, triggers the cross-version upgrade
-    #     path on Windows Update. Returns the frozen, official Retail build (e.g., 26200.8037).
-    #   - FallbackBuild: a build from the SAME milestone, triggers the CU path. Returns the
-    #     latest CU on the server, which may be ahead of what's broadly available on Retail.
-    # We prefer UpgradeBuild when available. FallbackBuild is used when the upgrade path
-    # isn't available yet (e.g., newly released milestones).
-    $milestoneConfig = @{
-        "26H1" = @{ UpgradeBuild = "26200.1";  FallbackBuild = "28000.1";  BuildPrefix = "28000" }
-        "25H2" = @{ UpgradeBuild = "26100.1";  FallbackBuild = "26200.1";  BuildPrefix = "26200" }
-        "24H2" = @{ UpgradeBuild = "22631.1";  FallbackBuild = "26100.1";  BuildPrefix = "26100" }
-    }
-
-    $fetchUrl = "$baseUrl/fetchupd.php?arch=$Architecture&ring=$ring"
     $matched = $null
 
-    if ($Channel -in @("Retail", "ReleasePreview")) {
-        $config = $milestoneConfig[$Milestone]
-        if (-not $config) {
-            Write-Error "Unknown milestone: $Milestone. Cannot determine base build for fetchupd query."
-            exit 1
-        }
-        $buildPrefix = $config.BuildPrefix
+    switch ($Channel) {
+        { $_ -in @("Retail", "ReleasePreview") } {
+            $ring = if ($Channel -eq "Retail") { "RETAIL" } else { "RP" }
 
-        # Try upgrade path first (cross-version), then fall back to CU path (same-version)
-        $buildCandidates = @($config.UpgradeBuild, $config.FallbackBuild) | Select-Object -Unique
-        foreach ($baseBuild in $buildCandidates) {
-            $tryUrl = "$fetchUrl&build=$baseBuild"
-            Write-Host "Querying fetchupd API for $Channel channel (ring: $ring), build=$baseBuild..."
-            Write-Host "URL: $tryUrl"
-
-            try {
-                $response = Invoke-ApiWithRetry -Uri $tryUrl
-            } catch {
-                Write-Warning "Request failed: $_"
-                continue
+            if ($config.RetailBuilds.Count -eq 0) {
+                Write-Error "Windows 11 $Milestone ($($config.Label)) is not available in the $Channel channel. Use the Experimental channel."
+                exit 1
+            }
+            if ($config.RetailArch -and $Architecture -ne $config.RetailArch) {
+                Write-Error "Windows 11 $Milestone is only available for $($config.RetailArch) in the $Channel channel (it ships only on new Arm devices). Select architecture '$($config.RetailArch)'."
+                exit 1
             }
 
-            if ($response.response.error) {
-                Write-Warning "API returned: $($response.response.error) (build=$baseBuild)"
-                Start-Sleep -Seconds 10
-                continue
-            }
+            $matched = Find-FetchUpdBuild -Ring $ring -BuildCandidates $config.RetailBuilds `
+                -BuildPattern $config.RetailPattern -Arch $Architecture
 
-            $updates = $response.response.updateArray
-            if (-not $updates) {
-                Write-Warning "No updateArray in response (build=$baseBuild)"
-                Start-Sleep -Seconds 10
-                continue
-            }
-
-            foreach ($update in $updates) {
-                if ($update.foundBuild -like "$buildPrefix.*") {
-                    $matched = $update
-                    Write-Host "Matched via build=$baseBuild"
-                    break
+            if (-not $matched) {
+                # Fall back to the builds UUP dump has already collected for this version
+                Write-Warning "fetchupd returned nothing usable, falling back to the UUP dump build database..."
+                $matched = Find-ListIdBuild -Search "Windows 11, version $Milestone" `
+                    -TitlePattern "^Windows 11, version $Milestone \(" -BuildPattern $config.RetailPattern -Arch $Architecture
+                if ($matched) {
+                    $matched = [PSCustomObject]@{ updateId = $matched.uuid; updateTitle = $matched.title; foundBuild = $matched.build }
                 }
             }
-            if ($matched) { break }
-
-            Write-Host "No matching $buildPrefix.* build found with build=$baseBuild, trying next..."
-            Start-Sleep -Seconds 10
+            $channelLabel = if ($Channel -eq "Retail") { "Retail" } else { "Release Preview" }
         }
-    } else {
-        # Insider channels (Beta/Dev/Canary): no build parameter needed
-        Write-Host "Querying fetchupd API for $Channel channel (ring: $ring)..."
-        Write-Host "URL: $fetchUrl"
-        $response = Invoke-ApiWithRetry -Uri $fetchUrl
+        "Beta" {
+            # The Beta channel follows its own build series (26220 today); the milestone
+            # input does not apply. Try the current series first, then the next likely one.
+            Write-Host "Beta channel: milestone '$Milestone' is not used (Beta has a single build series)"
+            $matched = Find-FetchUpdBuild -Ring "BETA" -BuildCandidates @("26220.1", "26220.latest", "26320.1", "26200.1") `
+                -BuildPattern '^26[2-9]\d{2}\.' -Arch $Architecture
 
-        if ($response.response.error) {
-            Write-Error "API error: $($response.response.error)"
-            exit 1
-        }
-
-        $updates = $response.response.updateArray
-        if (-not $updates) {
-            Write-Error "No builds found for $Channel channel ($Architecture)"
-            exit 1
-        }
-
-        # Take the first OS build (skip .NET Framework / Stack Package updates)
-        foreach ($update in $updates) {
-            if ($update.foundBuild -match '^\d{5}\.' -and $update.updateTitle -notlike "*Framework*" -and $update.updateTitle -notlike "*Stack Package*") {
-                $matched = $update
-                break
+            if (-not $matched) {
+                Write-Warning "fetchupd returned nothing usable, falling back to the UUP dump build database..."
+                $matched = Find-ListIdBuild -Search "Windows 11 Insider Preview" `
+                    -TitlePattern '^Windows 11 Insider Preview' -BuildPattern '^26[2-3]\d{2}\.' -Arch $Architecture
+                if ($matched) {
+                    $matched = [PSCustomObject]@{ updateId = $matched.uuid; updateTitle = $matched.title; foundBuild = $matched.build }
+                }
             }
+            $channelLabel = "Beta"
         }
-        if (-not $matched) {
-            $matched = $updates[0]
+        "Experimental" {
+            $matched = Find-FetchUpdBuild -Ring $config.ExpRing -BuildCandidates $config.ExpBuilds `
+                -BuildPattern $config.ExpPattern -Arch $Architecture
+
+            if (-not $matched) {
+                Write-Warning "fetchupd returned nothing usable, falling back to the UUP dump build database..."
+                $matched = Find-ListIdBuild -Search "Windows 11 Insider Preview" `
+                    -TitlePattern '^Windows 11 Insider Preview' -BuildPattern $config.ExpPattern -Arch $Architecture
+                if ($matched) {
+                    $matched = [PSCustomObject]@{ updateId = $matched.uuid; updateTitle = $matched.title; foundBuild = $matched.build }
+                }
+            }
+            $channelLabel = "Experimental ($($config.Label))"
+        }
+        default {
+            Write-Error "Unknown channel: $Channel. Supported: Retail, ReleasePreview, Beta, Experimental (Dev and Canary were merged into Experimental in April 2026)"
+            exit 1
         }
     }
 
     if (-not $matched) {
-        Write-Error "No matching build found for Windows 11 $Milestone ($Architecture) in $Channel channel"
+        Write-Error "No matching build found for Windows 11 $Milestone ($Architecture) in the $Channel channel"
         exit 1
     }
 
     $uuid = $matched.updateId
     $updateTitle = $matched.updateTitle
-    Write-Host "Found: $updateTitle (UUID: $uuid)"
+    Write-Host "Found: $updateTitle (UUID: $uuid) [$channelLabel]"
 }
 
-# Step 2: Get file list
+# --- Step 2: Get file list ------------------------------------------------------
+
+if (-not $QueryOnly) {
+
 Write-Host ""
+Write-Host "Waiting ${apiPauseSec}s before fetching the file list..."
+Start-Sleep -Seconds $apiPauseSec
 Write-Host "Fetching file list for UUID: $uuid..."
 $getUrl = "$baseUrl/get.php?id=$uuid&lang=$Language&edition=$Edition"
 $fileResponse = Invoke-ApiWithRetry -Uri $getUrl
@@ -292,42 +435,8 @@ if (-not $files) {
     exit 1
 }
 
-# Step 2b: Add en-us language pack if primary language is not en-us
-if ($Language -ne "en-us") {
-    Write-Host "Adding en-us language pack alongside primary language ($Language)..."
-    Write-Host "Waiting 10 seconds before API call..."
-    Start-Sleep -Seconds 10
+# --- Step 2b: Get Store App packages if available --------------------------------
 
-    $enUrl = "$baseUrl/get.php?id=$uuid&lang=en-us&edition=$Edition"
-    try {
-        $enResponse = Invoke-ApiWithRetry -Uri $enUrl
-        if (-not $enResponse.response.error) {
-            $enFiles = $enResponse.response.files
-            # Only add language packs and feature cabs, skip the edition ESD
-            # (e.g., professional_en-us.esd) to keep the user's chosen language as primary
-            $editionEsd = "$($Edition.ToLower())_en-us.esd"
-            $enCount = 0
-            foreach ($prop in $enFiles.PSObject.Properties) {
-                if ($prop.Name -eq $editionEsd) {
-                    Write-Host "Skipping $($prop.Name) (would override primary language)"
-                    continue
-                }
-                if (-not ($files.PSObject.Properties.Name -contains $prop.Name)) {
-                    $files | Add-Member -NotePropertyName $prop.Name -NotePropertyValue $prop.Value
-                    $enCount++
-                }
-            }
-            Write-Host "Added $enCount en-us language files"
-        } else {
-            Write-Warning "Could not fetch en-us files: $($enResponse.response.error)"
-        }
-    } catch {
-        Write-Warning "Failed to fetch en-us language pack: $_"
-        Write-Warning "Continuing with primary language only"
-    }
-}
-
-# Step 2c: Get Store App packages if available
 if ($fileResponse.response.appxPresent -eq $true) {
     Write-Host "Store App packages detected, fetching app file list..."
     $appUrl = "$baseUrl/get.php?id=$uuid&lang=neutral&edition=APP"
@@ -335,8 +444,8 @@ if ($fileResponse.response.appxPresent -eq $true) {
     $appFiles = $null
 
     for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
-        Write-Host "Waiting 10 seconds before API call (attempt $attempt/$maxRetries)..."
-        Start-Sleep -Seconds 10
+        Write-Host "Waiting ${apiPauseSec}s before API call (attempt $attempt/$maxRetries)..."
+        Start-Sleep -Seconds $apiPauseSec
 
         try {
             $appResponse = Invoke-ApiWithRetry -Uri $appUrl
@@ -364,8 +473,8 @@ if ($fileResponse.response.appxPresent -eq $true) {
     Write-Host "Added $appCount app package files"
 }
 
-# Step 3: Generate aria2 input file
-$aria2File = "D:\aria2_download_list.txt"
+# --- Step 3: Generate aria2 input file -------------------------------------------
+
 $fileCount = 0
 $totalSize = 0
 $aria2Content = New-Object System.Text.StringBuilder
@@ -391,11 +500,21 @@ foreach ($prop in $files.PSObject.Properties) {
     $totalSize += [long]$size
 }
 
-$aria2Content.ToString() | Out-File -FilePath $aria2File -Encoding utf8 -NoNewline
+if ($fileCount -eq 0) {
+    Write-Error "No downloadable files in the file list (all entries lack URLs)"
+    exit 1
+}
+
+$aria2Content.ToString() | Out-File -FilePath $Aria2File -Encoding utf8 -NoNewline
 $totalSizeGB = [math]::Round($totalSize / 1GB, 2)
 Write-Host "Generated aria2 input file: $fileCount files, ~${totalSizeGB} GB total"
 
-# Step 4: Extract build number from title
+} else {
+    Write-Host "QueryOnly: skipping file list and aria2 input generation"
+}
+
+# --- Step 4: Extract build number from title ---------------------------------------
+
 $buildNumber = "unknown"
 if ($updateTitle -match '(\d{5}\.\d+)') {
     $buildNumber = $Matches[1]
@@ -403,10 +522,25 @@ if ($updateTitle -match '(\d{5}\.\d+)') {
     $buildNumber = $Matches[1]
 }
 
+# .NET Framework 3.5 is no longer part of Windows 11 builds 27965 and later
+# (the converter skips it automatically for those builds).
+$buildMajor = 0
+if ($buildNumber -match '^(\d{5})') { $buildMajor = [int]$Matches[1] }
+$netfx3 = if ($buildMajor -ge 27965) { "false" } else { "true" }
+
+# Release tag suffix so Insider builds never collide with a Retail build of the same number
+$tagSuffix = ""
+if ($Product -eq "Windows 11" -and $Channel -ne "Retail") {
+    $tagSuffix = "-$Channel"
+}
+
 $buildDate = Get-Date -Format "yyyyMMdd"
 
-# Create a clean release title by stripping common prefixes
+# Create a clean release title by stripping common prefixes; tag Insider builds with their channel
 $releaseTitle = $updateTitle -replace '^Feature update to ', ''
+if ($Product -eq "Windows 11" -and $Channel -ne "Retail") {
+    $releaseTitle = "$releaseTitle [$channelLabel]"
+}
 
 # Output to GITHUB_OUTPUT
 "update_title=$updateTitle" >> $env:GITHUB_OUTPUT
@@ -414,10 +548,16 @@ $releaseTitle = $updateTitle -replace '^Feature update to ', ''
 "build_number=$buildNumber" >> $env:GITHUB_OUTPUT
 "build_date=$buildDate" >> $env:GITHUB_OUTPUT
 "uuid=$uuid" >> $env:GITHUB_OUTPUT
+"channel_label=$channelLabel" >> $env:GITHUB_OUTPUT
+"netfx3=$netfx3" >> $env:GITHUB_OUTPUT
+"language=$Language" >> $env:GITHUB_OUTPUT
+"tag_suffix=$tagSuffix" >> $env:GITHUB_OUTPUT
 
 Write-Host ""
 Write-Host "Build: $updateTitle"
 Write-Host "Release Title: $releaseTitle"
 Write-Host "Build Number: $buildNumber"
+Write-Host "Channel: $channelLabel"
+Write-Host ".NET 3.5 available: $netfx3"
 Write-Host "Date: $buildDate"
 Write-Host "UUID: $uuid"

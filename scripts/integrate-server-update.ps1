@@ -6,6 +6,139 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Load System.Web for URL encoding
+Add-Type -AssemblyName System.Web
+
+# --- Helper: Search Microsoft Update Catalog ---
+
+function Search-UpdateCatalog {
+    param([string]$Query, [int]$MaxRetries = 3)
+
+    $searchUrl = "https://www.catalog.update.microsoft.com/Search.aspx"
+    $headers = @{ "User-Agent" = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" }
+
+    for ($attempt = 1; $attempt -le $MaxRetries; $attempt++) {
+        Write-Host "Catalog search attempt $attempt/$MaxRetries..."
+        try {
+            $response = Invoke-WebRequest -Uri $searchUrl -Method Post `
+                -Body "q=$([System.Web.HttpUtility]::UrlEncode($Query))" `
+                -ContentType "application/x-www-form-urlencoded" `
+                -Headers $headers -UseBasicParsing
+
+            if ($response.StatusCode -ne 200) {
+                Write-Warning "Catalog returned status $($response.StatusCode)"
+                Start-Sleep -Seconds (30 * $attempt)
+                continue
+            }
+
+            $html = $response.Content
+            Write-Host "Response size: $($html.Length) chars"
+
+            # Extract GUID + title from the same <a> tag containing goToDetails
+            $pattern = '<a[^>]*goToDetails\("([a-f0-9\-]+)"\)[^>]*>\s*(.*?)\s*</a>'
+            $catalogMatches = [regex]::Matches($html, $pattern, `
+                [System.Text.RegularExpressions.RegexOptions]::Singleline)
+
+            Write-Host "Catalog matches: $($catalogMatches.Count)"
+
+            if ($catalogMatches.Count -eq 0) {
+                if ($html.Length -lt 5000) {
+                    Write-Warning "Response too short, catalog may be blocking or rate-limiting"
+                }
+                Write-Warning "No results found, retrying in $(30 * $attempt)s..."
+                Start-Sleep -Seconds (30 * $attempt)
+                continue
+            }
+
+            $results = @()
+            foreach ($m in $catalogMatches) {
+                $results += [PSCustomObject]@{
+                    GUID  = $m.Groups[1].Value
+                    Title = ($m.Groups[2].Value -replace '<[^>]+>', '').Trim()
+                }
+            }
+            return $results
+        } catch {
+            Write-Warning "Catalog request failed: $_"
+            Start-Sleep -Seconds (30 * $attempt)
+        }
+    }
+
+    Write-Warning "Catalog search failed after $MaxRetries attempts"
+    return @()
+}
+
+# --- Helper: Pick the newest matching catalog entry ---
+# Catalog result order is not guaranteed, so rank by the "YYYY-MM" title prefix, then by
+# the OS build in the title, then by KB number, instead of trusting the first row.
+
+function Select-LatestCatalogUpdate {
+    param(
+        [array]$Entries,
+        [string]$MustMatch,
+        [string[]]$Exclude = @()
+    )
+
+    $candidates = @($Entries | Where-Object { $_.Title -match $MustMatch })
+    foreach ($pattern in $Exclude) {
+        $candidates = @($candidates | Where-Object { $_.Title -notmatch $pattern })
+    }
+    if ($candidates.Count -eq 0) { return $null }
+
+    $ranked = $candidates | ForEach-Object {
+        $yearMonth = 0
+        if ($_.Title -match '^\s*(\d{4})-(\d{2})') { $yearMonth = [int]$Matches[1] * 100 + [int]$Matches[2] }
+        # Newer catalog titles also carry the resulting OS build, e.g. "(KB5129235) (26100.33451)"
+        $build = 0
+        if ($_.Title -match '\((\d{5})\.(\d+)\)') { $build = [long]$Matches[1] * 1000000 + [long]$Matches[2] }
+        $kb = 0
+        if ($_.Title -match 'KB(\d+)') { $kb = [long]$Matches[1] }
+        [PSCustomObject]@{ Entry = $_; YearMonth = $yearMonth; Build = $build; KB = $kb }
+    } | Sort-Object -Property @{ Expression = 'YearMonth'; Descending = $true }, @{ Expression = 'Build'; Descending = $true }, @{ Expression = 'KB'; Descending = $true }
+
+    return ($ranked | Select-Object -First 1).Entry
+}
+
+# --- Helper: Get download URLs for a catalog entry ---
+
+function Get-CatalogDownloadUrls {
+    param([string]$GUID)
+
+    $downloadUrl = "https://www.catalog.update.microsoft.com/DownloadDialog.aspx"
+    $postBody = @{ updateIDs = "[{`"size`":0,`"languages`":`"`",`"uidInfo`":`"$GUID`",`"updateID`":`"$GUID`"}]" }
+
+    $dlResponse = Invoke-WebRequest -Uri $downloadUrl -Method Post -Body $postBody -UseBasicParsing
+    $dlHtml = $dlResponse.Content
+
+    $urlMatches = [regex]::Matches($dlHtml, "https?://[^'""]+\.msu")
+    $urls = @($urlMatches | ForEach-Object { $_.Value } | Select-Object -Unique)
+    if ($urls.Count -eq 0) {
+        # Also try .cab files
+        $urlMatches = [regex]::Matches($dlHtml, "https?://[^'""]+\.(msu|cab)")
+        $urls = @($urlMatches | ForEach-Object { $_.Value } | Select-Object -Unique)
+    }
+    if ($urls.Count -eq 0) {
+        Write-Host "DownloadDialog response (first 2000 chars):"
+        Write-Host $dlHtml.Substring(0, [Math]::Min(2000, $dlHtml.Length))
+    }
+    return $urls
+}
+
+# --- Helper: Read build.UBR from a mounted image ---
+
+function Get-MountedImageVersion {
+    param([string]$MountDir)
+
+    $softwareHive = Join-Path $MountDir "Windows\System32\config\SOFTWARE"
+    & reg load "HKLM\OfflineImage" $softwareHive | Out-Null
+    try {
+        $ntCurrent = Get-ItemProperty "HKLM:\OfflineImage\Microsoft\Windows NT\CurrentVersion"
+        return "$($ntCurrent.CurrentBuildNumber).$($ntCurrent.UBR)"
+    } finally {
+        & reg unload "HKLM\OfflineImage" | Out-Null
+    }
+}
+
 # --- Step 0: Validate inputs ---
 
 $iso = Get-ChildItem "$ConverterDir\*.iso" | Select-Object -First 1
@@ -21,11 +154,14 @@ if (-not (Test-Path $cdimage)) {
     exit 1
 }
 
+# UUP dump edition IDs -> image names used by Microsoft media.
+# SERVERSTANDARD / SERVERDATACENTER are the Desktop Experience (GUI) editions,
+# the *CORE IDs are Server Core (no GUI), whose image name has no suffix.
 $editionNameMap = @{
-    "SERVERSTANDARD"         = "Windows Server 2025 Standard"
-    "SERVERSTANDARDCORE"     = "Windows Server 2025 Standard (Desktop Experience)"
-    "SERVERDATACENTER"       = "Windows Server 2025 Datacenter"
-    "SERVERDATACENTERCORE"   = "Windows Server 2025 Datacenter (Desktop Experience)"
+    "SERVERSTANDARD"         = "Windows Server 2025 Standard (Desktop Experience)"
+    "SERVERSTANDARDCORE"     = "Windows Server 2025 Standard"
+    "SERVERDATACENTER"       = "Windows Server 2025 Datacenter (Desktop Experience)"
+    "SERVERDATACENTERCORE"   = "Windows Server 2025 Datacenter"
 }
 
 if (-not $editionNameMap.ContainsKey($Edition)) {
@@ -55,64 +191,12 @@ New-Item -ItemType Directory -Path $updateDir -Force | Out-Null
 $searchQuery = "Cumulative Update for Microsoft server operating system, version 24H2 for x64-based Systems"
 Write-Host "Searching Microsoft Update Catalog for: $searchQuery"
 
-# Load System.Web for URL encoding
-Add-Type -AssemblyName System.Web
-
-# Search the catalog (with retry for flaky responses)
-$searchUrl = "https://www.catalog.update.microsoft.com/Search.aspx"
-$headers = @{ "User-Agent" = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" }
-$updates = @()
-
-for ($searchAttempt = 1; $searchAttempt -le 3; $searchAttempt++) {
-    Write-Host "Catalog search attempt $searchAttempt/3..."
-    try {
-        $response = Invoke-WebRequest -Uri $searchUrl -Method Post `
-            -Body "q=$([System.Web.HttpUtility]::UrlEncode($searchQuery))" `
-            -ContentType "application/x-www-form-urlencoded" `
-            -Headers $headers -UseBasicParsing
-
-        if ($response.StatusCode -ne 200) {
-            Write-Warning "Catalog returned status $($response.StatusCode)"
-            Start-Sleep -Seconds (30 * $searchAttempt)
-            continue
-        }
-
-        $html = $response.Content
-        Write-Host "Response size: $($html.Length) chars"
-
-        # Extract GUID + title from the same <a> tag containing goToDetails
-        $pattern = '<a[^>]*goToDetails\("([a-f0-9\-]+)"\)[^>]*>\s*(.*?)\s*</a>'
-        $catalogMatches = [regex]::Matches($html, $pattern, `
-            [System.Text.RegularExpressions.RegexOptions]::Singleline)
-
-        Write-Host "Catalog matches: $($catalogMatches.Count)"
-
-        if ($catalogMatches.Count -gt 0) {
-            foreach ($m in $catalogMatches) {
-                $updates += [PSCustomObject]@{
-                    GUID    = $m.Groups[1].Value
-                    Title   = ($m.Groups[2].Value -replace '<[^>]+>', '').Trim()
-                    Product = ""
-                    Date    = ""
-                    Size    = ""
-                }
-            }
-            break
-        }
-
-        Write-Warning "No results found, retrying in $(30 * $searchAttempt)s..."
-        Start-Sleep -Seconds (30 * $searchAttempt)
-    } catch {
-        Write-Warning "Catalog request failed: $_"
-        Start-Sleep -Seconds (30 * $searchAttempt)
-    }
-}
-
+$updates = Search-UpdateCatalog -Query $searchQuery
 Write-Host "Found $($updates.Count) catalog entries"
 
 if ($updates.Count -gt 0) {
-    Write-Host "First 3 entries:"
-    $updates | Select-Object -First 3 | ForEach-Object { Write-Host "  [$($_.GUID)] $($_.Title)" }
+    Write-Host "First 5 entries:"
+    $updates | Select-Object -First 5 | ForEach-Object { Write-Host "  [$($_.GUID)] $($_.Title)" }
 }
 
 if ($updates.Count -eq 0) {
@@ -120,28 +204,17 @@ if ($updates.Count -eq 0) {
     exit 1
 }
 
-# Filter: exclude Preview and Out-of-Band updates
-$filtered = $updates | Where-Object {
-    $_.Title -notmatch "Preview" -and
-    $_.Title -notmatch "Out-of-Band" -and
-    $_.Title -match "Cumulative Update"
-}
-
-if ($filtered.Count -eq 0) {
-    Write-Warning "No non-Preview updates found after filtering, using all results"
-    $filtered = $updates | Where-Object { $_.Title -match "Cumulative Update" }
-}
-
-if (-not $filtered -or $filtered.Count -eq 0) {
-    Write-Warning "Title filtering failed, using first catalog entry by GUID"
-    $filtered = $updates | Select-Object -First 1
-}
-
-# Take the first result (catalog returns newest first)
-$selectedUpdate = $filtered | Select-Object -First 1
+# Newest non-Preview, non-Out-of-Band OS cumulative update (exclude .NET and Dynamic Update rows)
+$selectedUpdate = Select-LatestCatalogUpdate -Entries $updates -MustMatch "Cumulative Update" `
+    -Exclude @("Preview", "Out-of-Band", "\.NET", "Dynamic")
 
 if (-not $selectedUpdate) {
-    Write-Error "Failed to select an update from catalog results"
+    Write-Warning "No non-Preview cumulative update found after filtering, relaxing filters"
+    $selectedUpdate = Select-LatestCatalogUpdate -Entries $updates -MustMatch "Cumulative Update" -Exclude @("\.NET", "Dynamic")
+}
+
+if (-not $selectedUpdate) {
+    Write-Error "Failed to select a cumulative update from catalog results"
     exit 1
 }
 
@@ -150,26 +223,10 @@ Write-Host "  GUID: $($selectedUpdate.GUID)"
 
 # --- Get download URLs from DownloadDialog ---
 
-$downloadUrl = "https://www.catalog.update.microsoft.com/DownloadDialog.aspx"
-$postBody = @{ updateIDs = "[{`"size`":0,`"languages`":`"`",`"uidInfo`":`"$($selectedUpdate.GUID)`",`"updateID`":`"$($selectedUpdate.GUID)`"}]" }
-
-$dlResponse = Invoke-WebRequest -Uri $downloadUrl -Method Post -Body $postBody -UseBasicParsing
-$dlHtml = $dlResponse.Content
-
-# Extract download URLs from the JavaScript response
-$urlMatches = [regex]::Matches($dlHtml, "https?://[^'""]+\.msu")
-$downloadUrls = $urlMatches | ForEach-Object { $_.Value } | Select-Object -Unique
-
-if ($downloadUrls.Count -eq 0) {
-    # Also try .cab files
-    $urlMatches = [regex]::Matches($dlHtml, "https?://[^'""]+\.(msu|cab)")
-    $downloadUrls = $urlMatches | ForEach-Object { $_.Value } | Select-Object -Unique
-}
+$downloadUrls = Get-CatalogDownloadUrls -GUID $selectedUpdate.GUID
 
 if ($downloadUrls.Count -eq 0) {
     Write-Error "No download URLs found for update $($selectedUpdate.GUID)"
-    Write-Host "DownloadDialog response (first 2000 chars):"
-    Write-Host $dlHtml.Substring(0, [Math]::Min(2000, $dlHtml.Length))
     exit 1
 }
 
@@ -209,16 +266,17 @@ $mountDir = Join-Path $WorkDir "mount"
 New-Item -ItemType Directory -Path $mountDir -Force | Out-Null
 
 # Get WIM image info and find the target index
-$wimInfo = Get-WindowsImage -ImagePath $wimPath
+$wimInfo = @(Get-WindowsImage -ImagePath $wimPath)
 Write-Host "WIM images:"
 foreach ($img in $wimInfo) {
     Write-Host "  Index $($img.ImageIndex): $($img.ImageName)"
 }
 
-$targetImage = $wimInfo | Where-Object { $_.ImageName -eq $editionName }
-if (-not $targetImage) {
-    # Try partial match
-    $targetImage = $wimInfo | Where-Object { $_.ImageName -like "*$editionName*" }
+$targetImage = $wimInfo | Where-Object { $_.ImageName -eq $editionName } | Select-Object -First 1
+if (-not $targetImage -and $wimInfo.Count -eq 1) {
+    # The converter only builds the requested edition, so a single-image WIM is the target
+    Write-Warning "Image name '$($wimInfo[0].ImageName)' does not match '$editionName'; using the only image in the WIM"
+    $targetImage = $wimInfo[0]
 }
 if (-not $targetImage) {
     Write-Error "Could not find WIM index matching edition '$editionName'"
@@ -233,6 +291,9 @@ Write-Host "Patching WIM index $targetIndex ($($targetImage.ImageName))..."
 Write-Host "Mounting WIM..."
 Mount-WindowsImage -ImagePath $wimPath -Index $targetIndex -Path $mountDir
 
+$baseVersion = Get-MountedImageVersion -MountDir $mountDir
+Write-Host "Base image version: $baseVersion"
+
 # Apply updates (point to folder so DISM discovers checkpoints automatically)
 Write-Host "Applying updates via DISM (this may take a while)..."
 try {
@@ -245,16 +306,28 @@ try {
 
 # Extract actual version from patched image registry
 Write-Host "Reading patched image version..."
-$softwareHive = Join-Path $mountDir "Windows\System32\config\SOFTWARE"
-& reg load "HKLM\OfflineImage" $softwareHive | Out-Null
-try {
-    $ntCurrent = Get-ItemProperty "HKLM:\OfflineImage\Microsoft\Windows NT\CurrentVersion"
-    $patchedBuild = $ntCurrent.CurrentBuildNumber
-    $patchedUBR = $ntCurrent.UBR
-    $patchedVersion = "${patchedBuild}.${patchedUBR}"
-    Write-Host "Patched image version: $patchedVersion"
-} finally {
-    & reg unload "HKLM\OfflineImage" | Out-Null
+$patchedVersion = Get-MountedImageVersion -MountDir $mountDir
+Write-Host "Patched image version: $patchedVersion"
+
+if ($patchedVersion -eq $baseVersion) {
+    # UUP dump refreshes Windows Server 2025 builds monthly, so the base image is often
+    # already at (or past) the newest catalog LCU. Nothing changed: keep the original ISO.
+    Write-Host "Base image already contains the latest cumulative update ($baseVersion); keeping original ISO"
+    Dismount-WindowsImage -Path $mountDir -Discard
+
+    if ($env:GITHUB_OUTPUT) {
+        "patched_version=$patchedVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+        "patched_iso_name=$($iso.Name)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+        "update_title=$($selectedUpdate.Title)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+    }
+
+    Write-Host "Cleaning up work directory..."
+    Remove-Item $WorkDir -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Host ""
+    Write-Host "Cumulative update integration skipped (already current)."
+    Write-Host "  ISO: $($iso.Name)"
+    Write-Host "  Version: $patchedVersion"
+    exit 0
 }
 
 # Dismount and remount to clear pending state before cleanup
@@ -326,6 +399,7 @@ Write-Host "Created patched ISO: $newIsoName"
 if ($env:GITHUB_OUTPUT) {
     "patched_version=$patchedVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
     "patched_iso_name=$newIsoName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+    "update_title=$($selectedUpdate.Title)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 }
 
 # Cleanup work directory
