@@ -157,6 +157,19 @@ jobs:
           }
           .\scripts\convert-to-iso.ps1 @params
 
+      - name: Ensure WinGet is available
+        shell: pwsh
+        run: |
+          if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+            Write-Host "Installing winget"
+            $ProgressPreference = 'SilentlyContinue'
+            $url = "https://aka.ms/getwinget"
+            $file = "$env:TEMP\Microsoft.DesktopAppInstaller.msixbundle"
+      
+            Invoke-WebRequest -Uri $url -OutFile $file
+            Add-AppxPackage -Path $file
+          }
+
       - name: Inject Custom Offline Apps & Scripts
         run: |
           $converterDir = "D:\converter"
