@@ -182,7 +182,13 @@ jobs:
       - name: Create Final Custom ISO
         run: |
           $converterDir = "D:\converter"
-          & $converterDir\bin\cdimage.exe -bootdata:2#p0,e,b"$converterDir\ISOFOLDER\boot\etfsboot.com"#pEF,e,b"$converterDir\ISOFOLDER\efi\microsoft\boot\efisys.bin" -o -m -u2 -udfver102 "$converterDir\ISOFOLDER" "$converterDir\Custom_Windows_Offline.iso"
+          Push-Location $converterDir
+          try {
+              & .\bin\cdimage.exe -bootdata:2#p0,e,b"ISOFOLDER\boot\etfsboot.com"#pEF,e,b"ISOFOLDER\efi\microsoft\boot\efisys.bin" -o -m -u2 -udfver102 "ISOFOLDER" "Custom_Windows_Offline.iso"
+              $exitCode = $LASTEXITCODE
+          } finally {
+              Pop-Location
+          }
           
       - name: Split ISO with 7z
         id: split
