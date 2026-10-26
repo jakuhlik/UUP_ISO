@@ -157,6 +157,26 @@ jobs:
           }
           .\scripts\convert-to-iso.ps1 @params
 
+      - name: Inject Custom Offline Apps & Scripts
+        run: |
+          $converterDir = "D:\converter"
+          $OemDir = "$converterDir\ISOFOLDER\sources\$OEM$\$$\Setup\Scripts"
+          $InstallerDir = "$OemDir\Installers"
+          
+          New-Item -ItemType Directory -Force -Path $InstallerDir
+  
+          winget download --id Google.Chrome -d "$InstallerDir" --accept-source-agreements
+          winget download --id 7zip.7zip -d "$InstallerDir" --accept-source-agreements
+  
+          Copy-Item ".\install-apps.ps1" -Destination "$OemDir\install-apps.ps1"
+  
+          Set-Content -Path "$OemDir\SetupComplete.cmd" -Value "Powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Windows\Setup\Scripts\install-apps.ps1"
+
+      - name: Create Final Custom ISO
+        run: |
+          $converterDir = "D:\converter"
+          .\Tools\oscdimg.exe -m -o -u2 -bootdata:2#p0,e,b"$converterDir\ISOFOLDER\boot\etfsboot.com"#pEF,e,b"$converterDir\ISOFOLDER\efi\microsoft\boot\efisys.bin" "$converterDir\ISOFOLDER" "$converterDir\Custom_Windows_Offline.iso"
+          
       - name: Split ISO with 7z
         id: split
         shell: pwsh
