@@ -167,7 +167,7 @@ jobs:
       - name: Inject Custom Offline Apps & Scripts
         run: |
           $converterDir = "D:\converter"
-          $OemDir = "$converterDir\ISOFOLDER\sources\$OEM$\$$\Setup\Scripts"
+          $OemDir = Join-Path $converterDir '\ISOFOLDER\sources\$OEM$\$$\Setup\Scripts'
           $InstallerDir = "$OemDir\Installers"
           
           New-Item -ItemType Directory -Force -Path $InstallerDir
@@ -182,7 +182,7 @@ jobs:
       - name: Create Final Custom ISO
         run: |
           $converterDir = "D:\converter"
-          .\Tools\oscdimg.exe -m -o -u2 -bootdata:2#p0,e,b"$converterDir\ISOFOLDER\boot\etfsboot.com"#pEF,e,b"$converterDir\ISOFOLDER\efi\microsoft\boot\efisys.bin" "$converterDir\ISOFOLDER" "$converterDir\Custom_Windows_Offline.iso"
+          $converterDir\Tools\oscdimg.exe -m -o -u2 -bootdata:2#p0,e,b"$converterDir\ISOFOLDER\boot\etfsboot.com"#pEF,e,b"$converterDir\ISOFOLDER\efi\microsoft\boot\efisys.bin" "$converterDir\ISOFOLDER" "$converterDir\Custom_Windows_Offline.iso"
           
       - name: Split ISO with 7z
         id: split
