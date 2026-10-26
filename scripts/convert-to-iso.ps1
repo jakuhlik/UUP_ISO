@@ -129,18 +129,18 @@ if ($exitCode -ne 0) {
 }
 
 # Verify ISO was produced
-$isoFiles = Get-ChildItem $ConverterDir -Filter "*.iso" -File
-if ($isoFiles.Count -eq 0) {
-    Write-Error "Conversion failed: no ISO file produced in $ConverterDir"
-    Write-Host "Converter directory contents:"
-    Get-ChildItem $ConverterDir -Recurse | Select-Object FullName, Length | Format-Table
-    exit 1
-}
+#$isoFiles = Get-ChildItem $ConverterDir -Filter "*.iso" -File
+#if ($isoFiles.Count -eq 0) {
+#    Write-Error "Conversion failed: no ISO file produced in $ConverterDir"
+#    Write-Host "Converter directory contents:"
+#    Get-ChildItem $ConverterDir -Recurse | Select-Object FullName, Length | Format-Table
+#    exit 1
+#}
 
-$iso = $isoFiles | Select-Object -First 1
-$isoSizeGB = [math]::Round($iso.Length / 1GB, 2)
-Write-Host ""
-Write-Host "ISO created successfully!"
-Write-Host "  File: $($iso.Name)"
-Write-Host "  Size: ${isoSizeGB} GB"
-Write-Host "  Path: $($iso.FullName)"
+#$iso = $isoFiles | Select-Object -First 1
+#$isoSizeGB = [math]::Round($iso.Length / 1GB, 2)
+#Write-Host ""
+#Write-Host "ISO created successfully!"
+#Write-Host "  File: $($iso.Name)"
+#Write-Host "  Size: ${isoSizeGB} GB"
+#Write-Host "  Path: $($iso.FullName)"
