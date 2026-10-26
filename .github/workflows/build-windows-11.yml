@@ -47,7 +47,7 @@ on:
 
 jobs:
   build-iso:
-    runs-on: windows-2022
+    runs-on: windows-2025
     timeout-minutes: 300
     permissions:
       contents: write
@@ -55,6 +55,13 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+
+      - name: Ensure WinGet is available
+        shell: pwsh
+        run: |
+          if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+            throw "winget is not installed on this runner. Install App Installer or use a runner image that includes WinGet."
+          }
 
       - name: Query UUP Dump API
         id: query
@@ -156,19 +163,6 @@ jobs:
             $params.DriversDir = "D:\drivers"
           }
           .\scripts\convert-to-iso.ps1 @params
-
-      - name: Ensure WinGet is available
-        shell: pwsh
-        run: |
-          if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-            Write-Host "Installing winget"
-            $ProgressPreference = 'SilentlyContinue'
-            $url = "https://aka.ms/getwinget"
-            $file = "$env:TEMP\Microsoft.DesktopAppInstaller.msixbundle"
-      
-            Invoke-WebRequest -Uri $url -OutFile $file
-            Add-AppxPackage -Path $file
-          }
 
       - name: Inject Custom Offline Apps & Scripts
         run: |
