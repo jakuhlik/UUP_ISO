@@ -187,7 +187,7 @@ jobs:
       - name: Create Final Custom ISO
         run: |
           $converterDir = "D:\converter"
-          $architecture = ${{ inputs.architecture }}
+          $architecture = "${{ inputs.architecture }}"
           $isoFolder = (Get-ChildItem -Path $converterDir -Filter "install.wim" -Recurse -ErrorAction SilentlyContinue) | Where-Object { $_.DirectoryName -like "*\sources" } | ForEach-Object { $_.Directory.Parent.FullName }
           if ( -Not (Test-Path $isoFolder -ErrorAction SilentlyContinue) ){
             Write-Error "ISO folder not found!"
