@@ -197,12 +197,12 @@ jobs:
               Push-Location $converterDir
               if ( $architecture -eq "arm64" ) 
               {
-                $allArgs = @("-bootdata:2#p0,e,b`"$isoFolder\boot\etfsboot.com`"#pEF,e,b`"$isoFolder\efi\microsoft\boot\efisys.bin`"", "-o", "-m", "-u2", "-udfver102", "`"$isoFolder`"", "`"Custom_Windows_Offline.iso`"")
+                $allArgs = @("-bootdata:2#p0,e,b$isoFolder\boot\etfsboot.com#pEF,e,b$isoFolder\efi\microsoft\boot\efisys.bin", "-o", "-m", "-u2", "-udfver102", "$isoFolder", "Custom_Windows_Offline.iso")
                 & .\bin\cdimage.exe $allArgs
               }
               else
               {
-                $allArgs = @("-bootdata:1#pEF,e,b`"$isoFolder\efi\microsoft\boot\efisys.bin`"", "-o", "-m", "-u2", "-udfver102", "`"$isoFolder`"", "`"Custom_Windows_Offline.iso`"")
+                $allArgs = @("-bootdata:1#pEF,e,b$isoFolder\efi\microsoft\boot\efisys.bin", "-o", "-m", "-u2", "-udfver102", "$isoFolder", "Custom_Windows_Offline.iso")
                 & .\bin\cdimage.exe $allArgs
               }
               $exitCode = $LASTEXITCODE
