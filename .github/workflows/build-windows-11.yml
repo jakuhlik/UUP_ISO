@@ -167,7 +167,12 @@ jobs:
       - name: Inject Custom Offline Apps & Scripts
         run: |
           $converterDir = "D:\converter"
-          $OemDir = Join-Path $converterDir '\ISOFOLDER\sources\$OEM$\$$\Setup\Scripts'
+          $isoFolder = (Get-ChildItem -Path $converterDir -Filter "install.wim" -Recurse -ErrorAction SilentlyContinue) | Where-Object { $_.DirectoryName -like "*\sources" } | ForEach-Object { $_.Directory.Parent.FullName }
+          if ( -Not (Test-Path $isoFolder -ErrorAction SilentlyContinue) ){
+            Write-Error "ISO folder not found!"
+            exit 1
+          }
+          $OemDir = Join-Path $isoFolder '\sources\$OEM$\$$\Setup\Scripts'
           $InstallerDir = "$OemDir\Installers"
           
           New-Item -ItemType Directory -Force -Path $InstallerDir
@@ -183,15 +188,20 @@ jobs:
         run: |
           $converterDir = "D:\converter"
           $architecture = ${{ inputs.architecture }}
+          $isoFolder = (Get-ChildItem -Path $converterDir -Filter "install.wim" -Recurse -ErrorAction SilentlyContinue) | Where-Object { $_.DirectoryName -like "*\sources" } | ForEach-Object { $_.Directory.Parent.FullName }
+          if ( -Not (Test-Path $isoFolder -ErrorAction SilentlyContinue) ){
+            Write-Error "ISO folder not found!"
+            exit 1
+          }
           try {
               Push-Location $converterDir
               if ( $architecture -eq "arm64" ) 
               {
-                & .\bin\cdimage.exe -bootdata:2#p0,e,b"ISOFOLDER\boot\etfsboot.com"#pEF,e,b"ISOFOLDER\efi\microsoft\boot\efisys.bin" -o -m -u2 -udfver102 "ISOFOLDER" "Custom_Windows_Offline.iso"
+                & .\bin\cdimage.exe -bootdata:2#p0,e,b"$isoFolder\boot\etfsboot.com"#pEF,e,b"$isoFolder\efi\microsoft\boot\efisys.bin" -o -m -u2 -udfver102 "$isoFolder" "Custom_Windows_Offline.iso"
               }
               else
               {
-                & .\bin\cdimage.exe -bootdata:1#pEF,e,b"ISOFOLDER\efi\Microsoft\boot\efisys.bin" -o -m -u2 -udfver102 "ISOFOLDER" "Custom_Windows_Offline.iso"
+                & .\bin\cdimage.exe -bootdata:1#pEF,e,b"$isoFolder\efi\Microsoft\boot\efisys.bin" -o -m -u2 -udfver102 "$isoFolder" "Custom_Windows_Offline.iso"
               }
               $exitCode = $LASTEXITCODE
           } finally {
