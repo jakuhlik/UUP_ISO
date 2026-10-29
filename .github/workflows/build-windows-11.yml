@@ -181,8 +181,9 @@ jobs:
           winget download --id 7zip.7zip -d "$InstallerDir" --accept-source-agreements
   
           Copy-Item ".\install-apps.ps1" -Destination "$OemDir\install-apps.ps1"
+          Copy-Item ".\Autounattend.xml" "$isoFolder" -ErrorAction SilentlyContinue
   
-          Set-Content -Path "$OemDir\SetupComplete.cmd" -Value "Powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Windows\Setup\Scripts\install-apps.ps1"
+          #Set-Content -Path "$OemDir\SetupComplete.cmd" -Value "Powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Windows\Setup\Scripts\install-apps.ps1"
 
       - name: Create Final Custom ISO
         run: |
