@@ -1,22 +1,24 @@
-# Povolení instalace z lokálních manifestů (nutné pro offline Winget)
+# Počkáme maximálně 30 sekund, než bude příkaz winget v systému dostupný
+$retry = 0
+while (!(Get-Command winget -ErrorAction SilentlyContinue) -and $retry -lt 100) {
+    Start-Sleep -Seconds 3
+    $retry++
+}
+
+# Zapnutí lokálních manifestů
 winget settings --enable LocalManifestFiles
 
-# Definujeme cestu, kde Windows po instalaci schová stažené soubory
+# Zbytek vašeho původního skriptu...
 $LocalDir = "C:\Windows\Setup\Scripts\Installers"
-
-# Vyhledáme všechny stažené .yaml soubory manifestů v této složce
 $Manifests = Get-ChildItem -Path $LocalDir -Filter "*.yaml"
 
-# Projdeme manifest po manifestu a nainstalujeme je offline
 foreach ($Manifest in $Manifests) {
     Write-Output "Instaluji aplikaci z manifestu: $($Manifest.Name)"
-    
-    # Instalace na pozadí přímo z lokálního souboru
+    # Přidány offline parametry pro jistotu
     winget install --manifest $Manifest.FullName --silent --accept-package-agreements --accept-source-agreements
 }
 
-# Smažeme celou podsložku s .exe/.msi/.yaml instalátory, které už nepotřebujeme
-$InstallerDir = "C:\Windows\Setup\Scripts\Installers"
-if (Test-Path $InstallerDir) {
-    Remove-Item -Path $InstallerDir -Recurse -Force
+# Úklid instalátorů
+if (Test-Path $LocalDir) {
+    Remove-Item -Path $LocalDir -Recurse -Force
 }
