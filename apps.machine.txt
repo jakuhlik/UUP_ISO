@@ -1,0 +1,11 @@
+Microsoft.VisualStudioCode
+Mozilla.Firefox
+7zip.7zip
+voidtools.Everything
+GIMP.GIMP.2
+HandBrake.HandBrake
+MHNexus.HxD
+Inkscape.Inkscape
+IrfanSkiljan.IrfanView
+Ghisler.TotalCommander
+WinMerge.WinMerge
