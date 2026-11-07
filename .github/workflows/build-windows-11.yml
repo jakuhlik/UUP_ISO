@@ -173,17 +173,10 @@ jobs:
             exit 1
           }
           $OemDir = Join-Path $isoFolder '\sources\$OEM$\$$\Setup\Scripts'
-          $InstallerDir = "$OemDir\Installers"
-          
-          New-Item -ItemType Directory -Force -Path $InstallerDir
-  
-          winget download --id Google.Chrome -d "$InstallerDir" --accept-source-agreements
-          winget download --id 7zip.7zip -d "$InstallerDir" --accept-source-agreements
-  
+    
           Copy-Item ".\install-apps.ps1" -Destination "$OemDir\install-apps.ps1"
-          Copy-Item ".\Autounattend.xml" "$isoFolder" -ErrorAction SilentlyContinue
-  
-          #Set-Content -Path "$OemDir\SetupComplete.cmd" -Value "Powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Windows\Setup\Scripts\install-apps.ps1"
+          Copy-Item ".\apps.machine.txt" -Destination "$OemDir\apps.machine.txt"
+          Copy-Item ".\autounattend.xml" "$isoFolder" -ErrorAction SilentlyContinue
 
       - name: Create Final Custom ISO
         run: |
