@@ -173,6 +173,8 @@ jobs:
             exit 1
           }
           $OemDir = Join-Path $isoFolder '\sources\$OEM$\$$\Setup\Scripts'
+
+          New-Item -ItemType Directory -Force -Path "$OemDir"
     
           Copy-Item ".\install-apps.ps1" -Destination "$OemDir\install-apps.ps1"
           Copy-Item ".\apps.machine.txt" -Destination "$OemDir\apps.machine.txt"
