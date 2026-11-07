@@ -247,7 +247,27 @@ jobs:
 
           echo "iso_hash=$isoHash" >> $env:GITHUB_OUTPUT
           echo "iso_filename=$($iso.Name)" >> $env:GITHUB_OUTPUT
+          
+      - name: Generate aria2 download list
+        id: aria_links
+        shell: pwsh
+        run: |
+          $iso = Get-ChildItem "D:\converter\*.iso" | Select-Object -First 1
+          $ariaFile = "D:\output\aria2.txt"
+          $tagName = "${{ steps.query.outputs.build_date }}-${{ steps.query.outputs.build_number }}-${{ inputs.architecture }}-${{ steps.query.outputs.language }}-${{ inputs.edition }}${{ steps.query.outputs.tag_suffix }}"
+          $baseReleaseUrl = "${{ github.server_url }}/${{ github.repository }}/releases/download/$tagName"
 
+          Get-ChildItem "D:\output\*.7z.*" | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA1).Hash
+            "$baseReleaseUrl/$($_.Name)" | Add-Content -Path $ariaFile -Encoding utf8
+            "    out=$($_.Name)" | Add-Content -Path $ariaFile -Encoding utf8
+            "    checksum=sha-1=$hash" | Add-Content -Path $ariaFile -Encoding utf8
+            "" | Add-Content -Path $ariaFile -Encoding utf8
+          }
+
+          Write-Host "Downloads:"
+          Get-Content $ariaFile
+          
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -276,3 +296,4 @@ jobs:
           files: |
             D:/output/*.7z.*
             D:/output/checksums.sha256
+            D:/output/aria2.txt
