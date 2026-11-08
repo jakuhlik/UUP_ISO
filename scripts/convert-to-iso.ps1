@@ -87,6 +87,17 @@ Write-Host "Created ConvertConfig.ini with [convert-UUP] header, updates, cleanu
 Write-Host "Config contents:"
 Get-Content $configPath | ForEach-Object { Write-Host "  $_" }
 
+Get-Content $(Join-Path $ConverterDir "CustomAppsList.txt") | ForEach-Object { 
+    if (-not "$_".StartsWith("#") -and "$_" -ne "") { 
+        Add-Content -Path $(Join-Path $ConverterDir "CustomAppsList2.txt") -Value $_ 
+    }
+}
+
+Write-Host "Custom apps:"
+Get-Content $(Join-Path $ConverterDir "CustomAppsList2.txt") | ForEach-Object { 
+    Write-Host $_ 
+}
+
 # Copy UUP files to converter's UUPs folder
 $converterUUPDir = Join-Path $ConverterDir "UUPs"
 New-Item -ItemType Directory -Path $converterUUPDir -Force | Out-Null
