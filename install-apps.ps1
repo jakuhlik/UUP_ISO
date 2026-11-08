@@ -14,19 +14,36 @@ while (!(Get-Command winget -ErrorAction SilentlyContinue) -and $retry -lt 10) {
     $retry++
 }
 if (!(Get-Command winget -ErrorAction SilentlyContinue)) {
-    Write-Output "Error: winget not found"
+    Write-Output "ERROR: winget not found"
     Stop-Transcript
     Exit 1
 }
 
 # Fix winget msstore certificate error on a fresh system
 Write-Output "Fixing certificate error on a fresh system"
-winget settings --enable BypassCertificatePinningForMicrosoftStore | Out-Null
-winget upgrade Microsoft.AppInstaller --accept-source-agreements --accept-package-agreements | Out-Null
-winget settings --disable BypassCertificatePinningForMicrosoftStore | Out-Null
+$Attempts = 6
+while ($true) {
+    try {
+	Write-Host "Trying to update winget"
+        winget settings --enable BypassCertificatePinningForMicrosoftStore | Out-Null
+	winget upgrade Microsoft.AppInstaller --accept-source-agreements --accept-package-agreements | Out-Null
+	winget settings --disable BypassCertificatePinningForMicrosoftStore | Out-Null
+        break
+    } catch {
+        if ($Attempts -le 0) {
+            Write-Host "ERROR: Unable to update winget!" -ForegroundColor Red
+            Stop-Transcript
+            Exit 1
+        }
+    }
+    Write-Host "WARNING: Unable to update winget. Trying again in 10s" -ForegroundColor Yellow
+    Start-Sleep -Seconds 10
+    $Attempts--
+}
 Write-Output "Done"
 
 Write-Output "Starting apps install using winget..."
+Copy-Item ".\settings.json" "$env:LOCALAPPDATA\Packages\Microsoft.DesktopAppInstaller_8wekyb3d8bbwe\LocalState\settings.json"
 
 function Winget-Install($AppList, $Scope) {
     foreach ($App in $(Get-Content -Path $AppList | Where-Object { $_ -match '\S' })) {
