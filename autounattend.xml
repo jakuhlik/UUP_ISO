@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
-	<!--https://schneegans.de/windows/unattend-generator/?LanguageMode=Interactive&PEMode=Default&WindowsEditionMode=Interactive&BypassRequirementsCheck=true&UseConfigurationSet=true&ProcessorArchitecture=amd64&BypassNetworkCheck=true&KeepSensitiveFiles=true&ComputerNameMode=Random&TimeZoneMode=Implicit&UserAccountMode=Interactive&PasswordExpirationMode=Unlimited&LockoutMode=Default&HideFiles=HiddenSystem&ShowFileExtensions=true&ClassicContextMenu=true&ShowEndTask=true&TaskbarSearch=Hide&TaskbarIconsMode=Default&LeftTaskbar=true&DisableBingResults=true&StartTilesMode=Default&StartPinsMode=Default&EnableLongPaths=true&DisableAppSuggestions=true&DisableEdgeStartupBoost=true&EffectsMode=Default&DeleteEdgeDesktopIcon=true&DesktopIconsMode=Custom&IconRecycleBin=true&IconThisPC=true&IconUserFiles=true&StartFoldersMode=Default&CoreIsolationMode=Enabled&WifiMode=Interactive&ExpressSettings=DisableAll&LockKeysMode=Skip&StickyKeysMode=Disabled&ColorMode=Custom&SystemColorTheme=Dark&AppsColorTheme=Light&AccentColor=%230078d4&WallpaperMode=Solid&WallpaperColor=%23000000&LockScreenMode=Default&FirstLogonScript0=start+%2Fw+powershell.exe+-NoProfile+-ExecutionPolicy+Bypass+-WindowStyle+Normal+-File+%22C%3A%5CWindows%5CSetup%5CScripts%5Cinstall-apps.ps1%22&FirstLogonScriptType0=Cmd&AppLockerMode=Skip-->
+	<!--https://schneegans.de/windows/unattend-generator/?LanguageMode=Interactive&PEMode=Default&WindowsEditionMode=Interactive&BypassRequirementsCheck=true&UseConfigurationSet=true&ProcessorArchitecture=amd64&BypassNetworkCheck=true&ComputerNameMode=Random&TimeZoneMode=Implicit&UserAccountMode=Interactive&PasswordExpirationMode=Unlimited&LockoutMode=Default&HideFiles=HiddenSystem&ShowFileExtensions=true&ClassicContextMenu=true&LaunchToThisPC=true&ShowEndTask=true&TaskbarSearch=Hide&TaskbarIconsMode=Default&LeftTaskbar=true&DisableBingResults=true&StartTilesMode=Default&StartPinsMode=Default&EnableLongPaths=true&DisableAppSuggestions=true&DisableEdgeStartupBoost=true&EffectsMode=Default&DeleteEdgeDesktopIcon=true&DesktopIconsMode=Custom&IconRecycleBin=true&IconThisPC=true&IconUserFiles=true&StartFoldersMode=Custom&StartFolderDocuments=true&StartFolderDownloads=true&StartFolderFileExplorer=true&StartFolderPersonalFolder=true&StartFolderSettings=true&CoreIsolationMode=Enabled&WifiMode=Interactive&ExpressSettings=DisableAll&LockKeysMode=Skip&StickyKeysMode=Disabled&ColorMode=Custom&SystemColorTheme=Dark&AppsColorTheme=Light&AccentColor=%230078d4&WallpaperMode=Solid&WallpaperColor=%23000000&LockScreenMode=Default&FirstLogonScript0=start+%2Fw+powershell.exe+-NoProfile+-ExecutionPolicy+Bypass+-WindowStyle+Normal+-File+%22C%3A%5CWindows%5CSetup%5CScripts%5Cinstall-apps.ps1%22&FirstLogonScriptType0=Cmd&AppLockerMode=Skip-->
 	<settings pass="offlineServicing"></settings>
 	<settings pass="windowsPE">
 		<component name="Microsoft-Windows-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
@@ -265,6 +265,9 @@ $scripts = @(
 		reg.exe add "HKCU\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32" /ve /f;
 	};
 	{
+		Set-ItemProperty -LiteralPath 'Registry::HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'LaunchTo' -Type 'DWord' -Value 1;
+	};
+	{
 		Set-ItemProperty -LiteralPath 'Registry::HKCU\Software\Microsoft\Windows\CurrentVersion\Search' -Name 'SearchboxTaskbarMode' -Type 'DWord' -Value 0;
 	};
 	{
@@ -296,6 +299,9 @@ $scripts = @(
 		Set-ItemProperty -Path 'Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\NewStartPanel' -Name '{20d04fe0-3aea-1069-a2d8-08002b30309d}' -Value 0 -Type 'DWord';
 		Set-ItemProperty -Path 'Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\NewStartPanel' -Name '{59031a47-3f72-44a7-89c5-5595fe6b30ee}' -Value 0 -Type 'DWord';
 		Set-ItemProperty -Path 'Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\NewStartPanel' -Name '{a0953c92-50dc-43bf-be83-3742fed03c9c}' -Value 1 -Type 'DWord';
+	};
+	{
+		Set-ItemProperty -Path 'Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Start' -Name 'VisiblePlaces' -Value $( [convert]::FromBase64String('ztU0LVr6Q0WC8iLm6vd3PC+zZ+PeiVVDv85h83sYqTe8JIoUDNaJQqCAbtm7okiCSrC9dEr5aE+L1kOYBx2ovIYIc1KqUUNCn3sndlhGWdQ=') ) -Type 'Binary';
 	};
 	{
 		&amp; 'C:\Windows\Setup\Scripts\SetColorTheme.ps1';
@@ -399,6 +405,13 @@ $scripts = @(
 $scripts = @(
 	{
 		C:\Windows\Setup\Scripts\unattend-01.cmd;
+	};
+	{
+		Remove-Item -LiteralPath @(
+		  'C:\Windows\Panther\unattend.xml';
+		  'C:\Windows\Panther\unattend-original.xml';
+		  'C:\Windows\Setup\Scripts\Wifi.xml';
+		) -Force -ErrorAction 'SilentlyContinue' -Verbose;
 	};
 );
 
