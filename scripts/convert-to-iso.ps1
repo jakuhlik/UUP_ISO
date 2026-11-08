@@ -50,7 +50,7 @@ $lines = @(
     "AddDrivers=0",
     "Drv_Source=\Drivers",
     "[Store_Apps]",
-    "SkipApps=1",
+    "SkipApps=0",
     "AppsLevel=0",
     "StubAppsFull=1",
     "CustomList=1",
@@ -87,15 +87,11 @@ Write-Host "Created ConvertConfig.ini with [convert-UUP] header, updates, cleanu
 Write-Host "Config contents:"
 Get-Content $configPath | ForEach-Object { Write-Host "  $_" }
 
-Get-Content $(Join-Path $ConverterDir "CustomAppsList.txt") | ForEach-Object { 
-    if (-not "$_".StartsWith("#") -and "$_" -ne "") { 
-        Add-Content -Path $(Join-Path $ConverterDir "CustomAppsList2.txt") -Value $_ 
-    }
-}
-
 Write-Host "Custom apps:"
-Get-Content $(Join-Path $ConverterDir "CustomAppsList2.txt") | ForEach-Object { 
-    Write-Host $_ 
+Get-Content $(Join-Path $ConverterDir "CustomAppsList.txt") | ForEach-Object { 
+    if (-not "$_".StartsWith("#") -and "$_" -ne "") {
+        Write-Host $_
+    }
 }
 
 # Copy UUP files to converter's UUPs folder
