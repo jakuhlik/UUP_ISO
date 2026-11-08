@@ -43,7 +43,7 @@ while ($true) {
 Write-Output "Done"
 
 Write-Output "Starting apps install using winget..."
-Copy-Item ".\settings.json" "$env:LOCALAPPDATA\Packages\Microsoft.DesktopAppInstaller_8wekyb3d8bbwe\LocalState\settings.json"
+Copy-Item "C:\Windows\Setup\Scripts\settings.json" "$env:LOCALAPPDATA\Packages\Microsoft.DesktopAppInstaller_8wekyb3d8bbwe\LocalState\settings.json"
 
 function Winget-Install($AppList, $Scope) {
     foreach ($App in $(Get-Content -Path $AppList | Where-Object { $_ -match '\S' })) {
