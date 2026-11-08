@@ -50,7 +50,7 @@ $lines = @(
     "AddDrivers=0",
     "Drv_Source=\Drivers",
     "[Store_Apps]",
-    "SkipApps=0",
+    "SkipApps=1",
     "AppsLevel=0",
     "StubAppsFull=1",
     "CustomList=1",
