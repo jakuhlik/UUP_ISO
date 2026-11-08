@@ -162,6 +162,9 @@ jobs:
           if (Test-Path "D:\drivers") {
             $params.DriversDir = "D:\drivers"
           }
+
+          Copy-Item ".\CustomAppsList.txt" "D:\converter\CustomAppsList.txt"
+          
           .\scripts\convert-to-iso.ps1 @params
 
       - name: Inject Custom Offline Apps & Scripts
