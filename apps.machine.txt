@@ -1,5 +1,5 @@
 Microsoft.VisualStudioCode
-Mozilla.Firefox
+Mozilla.Firefox.cs
 7zip.7zip
 voidtools.Everything
 GIMP.GIMP.2
